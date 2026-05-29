@@ -22,7 +22,6 @@ import {
   type UnshieldedWalletState,
   type WalletFacade
 } from '@midnight-ntwrk/wallet-sdk';
-import { MidnightBech32m } from '@midnight-ntwrk/wallet-sdk/address-format';
 import axios from 'axios';
 import * as Rx from 'rxjs';
 
@@ -120,9 +119,9 @@ export const waitForFunds = async (
   wallet: WalletFacade,
   env: EnvironmentConfiguration,
   fundFromFaucet = false,
-  unshieldedKeystore?: UnshieldedKeystore
+  unshieldedKeystore: UnshieldedKeystore
 ): Promise<bigint> => {
-  const unshieldedAddress = MidnightBech32m.encode(env.networkId, await wallet.unshielded.getAddress()).asString();
+  const unshieldedAddress = unshieldedKeystore.getBech32Address().asString();
   const nightTokenRaw = unshieldedToken().raw;
   logger.info(`Your wallet address is: ${unshieldedAddress}, waiting for NIGHT funds...`);
 
