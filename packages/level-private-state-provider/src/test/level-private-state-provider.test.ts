@@ -26,6 +26,7 @@ import {
   type SigningKeyExport,
   SigningKeyExportError
 } from '@midnight-ntwrk/midnight-js-types';
+import { PasswordValidationError,type PasswordValidationFailure } from '@midnight-ntwrk/midnight-js-utils';
 import * as crypto from 'crypto';
 import { Level } from 'level';
 import * as superjson from 'superjson';
@@ -33,6 +34,28 @@ import { vi } from 'vitest';
 
 import { type DatabaseLevel, levelPrivateStateProvider, migrateToAccountScoped } from '../index';
 import { StorageEncryption } from '../storage-encryption';
+
+const captureError = async (action: () => Promise<unknown>): Promise<unknown> => {
+  try {
+    await action();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+};
+
+const expectPasswordValidationCause = (
+  error: unknown,
+  reason: PasswordValidationFailure
+): void => {
+  expect(error).toBeInstanceOf(Error);
+  if (error instanceof Error) {
+    expect(error.cause).toBeInstanceOf(PasswordValidationError);
+    if (error.cause instanceof PasswordValidationError) {
+      expect(error.cause.reason).toBe(reason);
+    }
+  }
+};
 
 describe('Level Private State Provider', (): void => {
   const TEST_PASSWORD = 'Test-Storage-Pass8!';
@@ -463,6 +486,46 @@ describe('Level Private State Provider', (): void => {
       await expect(
         db.importPrivateStates(exportData, { password: 'short' })
       ).rejects.toThrow(PrivateStateExportError);
+    });
+
+    describe('strict password policy on export/import', () => {
+      test.each<[PasswordValidationFailure, string]>([
+        ['too_short', 'short'],
+        ['repeated_characters', 'aaaaaaaaaaaaaaaa'],
+        ['insufficient_classes', 'abcdefghjkmnpqrs'],
+        ['sequential_pattern', 'Password-123456!']
+      ])('exportPrivateStates rejects weak password (%s)', async (reason, weakPassword) => {
+        const db = levelPrivateStateProvider<PID, PS>(testConfig);
+        db.setContractAddress(TEST_CONTRACT_ADDRESS);
+        await db.set('stringValue', testStates.stringValue);
+
+        const error = await captureError(() =>
+          db.exportPrivateStates({ password: weakPassword })
+        );
+
+        expect(error).toBeInstanceOf(PrivateStateExportError);
+        expectPasswordValidationCause(error, reason);
+      });
+
+      test.each<[PasswordValidationFailure, string]>([
+        ['too_short', 'short'],
+        ['repeated_characters', 'aaaaaaaaaaaaaaaa'],
+        ['insufficient_classes', 'abcdefghjkmnpqrs'],
+        ['sequential_pattern', 'Password-123456!']
+      ])('importPrivateStates rejects weak password (%s)', async (reason, weakPassword) => {
+        const db = levelPrivateStateProvider<PID, PS>(testConfig);
+        db.setContractAddress(TEST_CONTRACT_ADDRESS);
+        await db.set('stringValue', testStates.stringValue);
+        const exportData = await db.exportPrivateStates({ password: EXPORT_PASSWORD });
+        await db.clear();
+
+        const error = await captureError(() =>
+          db.importPrivateStates(exportData, { password: weakPassword })
+        );
+
+        expect(error).toBeInstanceOf(PrivateStateExportError);
+        expectPasswordValidationCause(error, reason);
+      });
     });
 
     test('throws ImportConflictError when conflict strategy is error (default)', async () => {
@@ -907,7 +970,7 @@ describe('Level Private State Provider', (): void => {
   });
 
   describe('Signing Key Export/Import', () => {
-    const EXPORT_PASSWORD = 'export-test-password-1234';
+    const EXPORT_PASSWORD = 'Sk-Export-Test-Pass9!';
     const CONTRACT_ADDRESS_1 = 'contract-address-1' as ContractAddress;
     const CONTRACT_ADDRESS_2 = 'contract-address-2' as ContractAddress;
 
@@ -965,7 +1028,7 @@ describe('Level Private State Provider', (): void => {
       await db.clearSigningKeys();
 
       await expect(
-        db.importSigningKeys(exportData, { password: 'wrong-password-12345' })
+        db.importSigningKeys(exportData, { password: 'Wrong-Pass8-Test!!' })
       ).rejects.toThrow(ExportDecryptionError);
     });
 
@@ -996,6 +1059,44 @@ describe('Level Private State Provider', (): void => {
       await expect(
         db.importSigningKeys(exportData, { password: 'short' })
       ).rejects.toThrow(SigningKeyExportError);
+    });
+
+    describe('strict password policy on signing keys export/import', () => {
+      test.each<[PasswordValidationFailure, string]>([
+        ['too_short', 'short'],
+        ['repeated_characters', 'aaaaaaaaaaaaaaaa'],
+        ['insufficient_classes', 'abcdefghjkmnpqrs'],
+        ['sequential_pattern', 'Password-123456!']
+      ])('exportSigningKeys rejects weak password (%s)', async (reason, weakPassword) => {
+        const db = levelPrivateStateProvider<PID, PS>(testConfig);
+        await db.setSigningKey(CONTRACT_ADDRESS_1, sampleSigningKey());
+
+        const error = await captureError(() =>
+          db.exportSigningKeys({ password: weakPassword })
+        );
+
+        expect(error).toBeInstanceOf(SigningKeyExportError);
+        expectPasswordValidationCause(error, reason);
+      });
+
+      test.each<[PasswordValidationFailure, string]>([
+        ['too_short', 'short'],
+        ['repeated_characters', 'aaaaaaaaaaaaaaaa'],
+        ['insufficient_classes', 'abcdefghjkmnpqrs'],
+        ['sequential_pattern', 'Password-123456!']
+      ])('importSigningKeys rejects weak password (%s)', async (reason, weakPassword) => {
+        const db = levelPrivateStateProvider<PID, PS>(testConfig);
+        await db.setSigningKey(CONTRACT_ADDRESS_1, sampleSigningKey());
+        const exportData = await db.exportSigningKeys({ password: EXPORT_PASSWORD });
+        await db.clearSigningKeys();
+
+        const error = await captureError(() =>
+          db.importSigningKeys(exportData, { password: weakPassword })
+        );
+
+        expect(error).toBeInstanceOf(SigningKeyExportError);
+        expectPasswordValidationCause(error, reason);
+      });
     });
 
     test('throws ImportConflictError when conflict strategy is error (default)', async () => {
@@ -1168,7 +1269,7 @@ describe('Level Private State Provider', (): void => {
     });
 
     describe('malformed data edge cases', () => {
-      const VALID_PASSWORD = 'valid-password-for-test';
+      const VALID_PASSWORD = 'Valid-Pass9-Test!@';
 
       test('throws ExportDecryptionError for garbage base64 payload', async () => {
         const db = levelPrivateStateProvider<PID, PS>(testConfig);
@@ -1780,6 +1881,79 @@ describe('Level Private State Provider', (): void => {
         await expect(
           db.changePassword(() => OLD_PASSWORD, () => NEW_PASSWORD)
         ).resolves.not.toThrow();
+      });
+
+      // The sublevel name format mirrors getScopedLevelName in level-private-state-provider.ts (sha256 hex prefix sliced to ACCOUNT_ID_HASH_LENGTH).
+      const buildScopedSublevelName = (accountId: string): string =>
+        `private-states:${crypto.createHash('sha256').update(accountId).digest('hex').substring(0, 32)}`;
+
+      test('aborts rotation when sublevel contains an unencrypted entry', async () => {
+        const config = {
+          midnightDbName: ROTATION_TEST_DB,
+          privateStoragePasswordProvider: () => OLD_PASSWORD,
+          accountId: TEST_ACCOUNT_ID
+        };
+
+        const db = levelPrivateStateProvider<string, string>(config);
+        db.setContractAddress(ROTATION_CONTRACT_ADDRESS);
+        await db.set('key1', 'value1');
+        await db.set('key2', 'value2');
+
+        const sublevelName = buildScopedSublevelName(TEST_ACCOUNT_ID);
+        const plaintextKey = `${ROTATION_CONTRACT_ADDRESS}:plaintext-entry`;
+
+        const directLevel = new Level(ROTATION_TEST_DB, { createIfMissing: true });
+        const directSublevel = directLevel.sublevel<string, string>(sublevelName, { valueEncoding: 'utf-8' });
+        await directLevel.open();
+        await directSublevel.open();
+        await directSublevel.put(plaintextKey, 'this-is-not-encrypted');
+        await directSublevel.close();
+        await directLevel.close();
+
+        await expect(
+          db.changePassword(() => OLD_PASSWORD, () => NEW_PASSWORD)
+        ).rejects.toThrow(/Failed to decrypt entry.*Unrecognized or unencrypted data/);
+
+        const value1 = await db.get('key1');
+        const value2 = await db.get('key2');
+        expect(value1).toBe('value1');
+        expect(value2).toBe('value2');
+      });
+
+      test('propagates raw error when first iterated entry is unencrypted', async () => {
+        const config = {
+          midnightDbName: ROTATION_TEST_DB,
+          privateStoragePasswordProvider: () => OLD_PASSWORD,
+          accountId: TEST_ACCOUNT_ID
+        };
+
+        const db = levelPrivateStateProvider<string, string>(config);
+        db.setContractAddress(ROTATION_CONTRACT_ADDRESS);
+        await db.set('key1', 'value1');
+        await db.set('key2', 'value2');
+
+        const sublevelName = buildScopedSublevelName(TEST_ACCOUNT_ID);
+        // Lex-sort before ROTATION_CONTRACT_ADDRESS so iterator hits this first.
+        const plaintextKey = 'aaa-contract:plaintext-first';
+
+        const directLevel = new Level(ROTATION_TEST_DB, { createIfMissing: true });
+        const directSublevel = directLevel.sublevel<string, string>(sublevelName, { valueEncoding: 'utf-8' });
+        await directLevel.open();
+        await directSublevel.open();
+        await directSublevel.put(plaintextKey, 'this-is-not-encrypted');
+        await directSublevel.close();
+        await directLevel.close();
+
+        // First-entry path at rotateStorePassword: isDecryptionError returns false for the new message,
+        // so the error propagates raw (not wrapped by "Failed to decrypt entry" nor "Old password is incorrect").
+        await expect(
+          db.changePassword(() => OLD_PASSWORD, () => NEW_PASSWORD)
+        ).rejects.toThrow(/^Unrecognized or unencrypted data encountered during decryption$/);
+
+        const value1 = await db.get('key1');
+        const value2 = await db.get('key2');
+        expect(value1).toBe('value1');
+        expect(value2).toBe('value2');
       });
 
       test('re-encrypts all contracts data in sublevel to prevent data loss', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@midnight-ntwrk/midnight-js-utils",
-  "version": "4.0.4",
+  "version": "4.1.0",
   "description": "Shared utilities for MidnightJS modules",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
@@ -30,9 +30,11 @@
   ],
   "dependencies": {
     "@midnight-ntwrk/midnight-js-network-id": "workspace:*",
-    "@midnight-ntwrk/midnight-js-protocol": "workspace:*"
+    "@midnight-ntwrk/midnight-js-protocol": "workspace:*",
+    "@midnight-ntwrk/wallet-sdk-address-format": "^3.1.0"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0"
+    "@types/node": "^24.0.0",
+    "vitest": "^4.1.7"
   }
 }
