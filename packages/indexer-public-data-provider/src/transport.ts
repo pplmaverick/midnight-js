@@ -20,23 +20,42 @@ import { GraphQLWsLink } from '@apollo/client/link/subscriptions';
 import { getMainDefinition } from '@apollo/client/utilities';
 import fetch from 'cross-fetch';
 import { createClient } from 'graphql-ws';
-import type * as ws from 'isomorphic-ws';
+
+import type { ValidatedConfig } from './config';
+
+/**
+ * Resource-bearing handle that pairs the Apollo client with an idempotent
+ * `dispose()` for releasing the underlying WebSocket connection.
+ */
+export type ApolloHandle = {
+  readonly client: ApolloClient;
+  /**
+   * Stops the Apollo client (`client.stop()` is void in Apollo Client 4.x
+   * — it unsubscribes active observables, rejects in-flight queries, and
+   * clears the suspense cache; the `InMemoryCache` itself is not cleared),
+   * then awaits the `graphql-ws` client's `dispose()` to close the
+   * WebSocket connection.
+   *
+   * Repeated and concurrent invocations share a single teardown — they
+   * return the same `Promise` and never re-run `client.stop()` or
+   * `wsClient.dispose()`. If the first invocation rejects, subsequent
+   * invocations return the same rejected `Promise` — teardown is not
+   * retried.
+   */
+  dispose(): Promise<void>;
+};
 
 /**
  * Constructs the Apollo client used by the indexer public data provider.
- * Queries go through an HTTP link wrapped in a retry link with exponential
- * backoff; subscriptions go through a `graphql-ws` link. The split direction
- * is decided per operation by inspecting the GraphQL operation kind.
+ * Queries flow through an HTTP link wrapped in a retry link with exponential
+ * backoff; subscriptions flow through a `graphql-ws` link. Operation kind
+ * decides the split.
  *
- * Retry policy is intentionally hardcoded in this phase — exposing it via
- * configuration is out of scope for the Phase 1–2 restructure.
+ * Retry policy is intentionally hardcoded — exposing it as configuration
+ * is out of scope for the Phase 1–2 restructure.
  */
-export const createApolloClient = (
-  queryURL: string,
-  subscriptionURL: string,
-  webSocketImpl: typeof ws.WebSocket
-): ApolloClient => {
-  const link = new HttpLink({ fetch, uri: queryURL });
+export const createApolloClient = (validated: ValidatedConfig): ApolloHandle => {
+  const httpLink = new HttpLink({ fetch, uri: validated.queryURLString });
   const retryLink = new RetryLink({
     delay: {
       initial: 1000,
@@ -47,17 +66,32 @@ export const createApolloClient = (
       max: 5
     }
   });
-  const apolloLink = from([retryLink, link]);
+  const apolloLink = from([retryLink, httpLink]);
 
-  return new ApolloClient({
+  const wsClient = createClient({ url: validated.subscriptionURLString, webSocketImpl: validated.webSocket });
+
+  const client = new ApolloClient({
     link: split(
       ({ query }) => {
         const definition = getMainDefinition(query);
         return definition.kind === 'OperationDefinition' && definition.operation === 'subscription';
       },
-      new GraphQLWsLink(createClient({ url: subscriptionURL, webSocketImpl })),
+      new GraphQLWsLink(wsClient),
       apolloLink
     ),
     cache: new InMemoryCache()
   });
+
+  let disposePromise: Promise<void> | null = null;
+
+  return {
+    client,
+    dispose(): Promise<void> {
+      disposePromise ??= (async () => {
+        client.stop();
+        await wsClient.dispose();
+      })();
+      return disposePromise;
+    }
+  };
 };
