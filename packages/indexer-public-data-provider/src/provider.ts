@@ -28,6 +28,7 @@ import type {
   PublicDataProvider,
   UnshieldedBalances
 } from '@midnight-ntwrk/midnight-js-types';
+import { assertIsContractAddress } from '@midnight-ntwrk/midnight-js-utils';
 import * as Rx from 'rxjs';
 
 import {
@@ -40,15 +41,20 @@ import {
   toUnshieldedBalances,
   toUnshieldedUtxos
 } from './codec';
-import { IndexerDataError, IndexerProviderConfigError } from './errors';
+import { IndexerDataError, IndexerInvariantError, IndexerProviderConfigError } from './errors';
 import type {
   ContractActionOffset,
   DeployContractStateTxQueryQuery,
-  DeployTxQueryQuery,
   InputMaybe,
   RegularTransaction
 } from './gen/graphql';
-import { type ExcludeEmptyAndNull, isRegularTransaction, toFinalizedDeployTxData } from './mapping';
+import {
+  type ExcludeEmptyAndNull,
+  extractRegularDeployTransaction,
+  extractUnshieldedBalances,
+  isRegularTransaction,
+  toFinalizedDeployTxData
+} from './mapping';
 import {
   blockOffsetToBlock$,
   blockOffsetToContractState$,
@@ -56,12 +62,12 @@ import {
   blockToContractState$,
   contractAddressToLatestBlockOffset$,
   maybeThrowQueryError,
+  pollUntilPresent,
   transactionIdToTransaction$,
   transactionToContractState$,
   waitForBlockToAppear,
   waitForContractToAppear,
-  waitForUnshieldedBalancesToAppear,
-  withCompleteQueryData
+  waitForUnshieldedBalancesToAppear
 } from './observables';
 import {
   CONTRACT_AND_ZSWAP_STATE_QUERY,
@@ -74,15 +80,10 @@ import {
 import type { ApolloHandle } from './transport';
 
 /**
- * Class form of the indexer-backed `PublicDataProvider`. Carries the
- * Apollo handle and the resolved poll interval. Does **not** call
- * `assertIsContractAddress` — the outer wrapper in `index.ts` retains that
- * responsibility until Phase 3.
- *
- * Phase 2 introduces this class for two reasons:
- *  1. To carry a `dispose()` lifecycle method (fix #820).
- *  2. To establish the `(handle, pollInterval)` constructor shape that
- *     maps directly onto `Layer.scoped` in the future Effect migration (#843).
+ * Indexer-backed `PublicDataProvider`. Every method that takes a
+ * `ContractAddress` validates the input up front via
+ * `assertIsContractAddress`. The constructor shape `(handle, pollInterval)`
+ * maps directly onto `Layer.scoped` in the future Effect migration (#843).
  *
  * TODO: Re-examine caching when 'ContractCall' and 'ContractDeploy' have
  * transaction identifiers included.
@@ -109,17 +110,18 @@ export class IndexerPublicDataProvider implements PublicDataProvider {
     return this.handle.client;
   }
 
-  async queryContractState(
+  queryContractState(
     address: ContractAddress,
     config?: BlockHeightConfig | BlockHashConfig
   ): Promise<ContractState | null> {
+    assertIsContractAddress(address);
     const offset: InputMaybe<ContractActionOffset> = config
       ? {
           blockOffset:
             config.type === 'blockHeight' ? { height: config.blockHeight } : { hash: config.blockHash }
         }
       : null;
-    const maybeContractState = await this.client
+    return this.client
       .query({
         query: CONTRACT_STATE_QUERY,
         variables: {
@@ -129,21 +131,22 @@ export class IndexerPublicDataProvider implements PublicDataProvider {
         fetchPolicy: 'no-cache'
       })
       .then(maybeThrowQueryError)
-      .then((queryResult) => queryResult.data?.contractAction?.state ?? null);
-    return maybeContractState ? parseHexContractState(maybeContractState) : null;
+      .then((queryResult) => queryResult.data?.contractAction?.state ?? null)
+      .then((maybeContractState) => (maybeContractState ? parseHexContractState(maybeContractState) : null));
   }
 
-  async queryZSwapAndContractState(
+  queryZSwapAndContractState(
     address: ContractAddress,
     config?: BlockHeightConfig | BlockHashConfig
   ): Promise<[ZswapChainState, ContractState, LedgerParameters] | null> {
+    assertIsContractAddress(address);
     const offset = config
       ? {
           blockOffset:
             config.type === 'blockHeight' ? { height: config.blockHeight } : { hash: config.blockHash }
         }
       : null;
-    const maybeContractStates = await this.client
+    return this.client
       .query({
         query: CONTRACT_AND_ZSWAP_STATE_QUERY,
         variables: {
@@ -153,29 +156,32 @@ export class IndexerPublicDataProvider implements PublicDataProvider {
         fetchPolicy: 'no-cache'
       })
       .then(maybeThrowQueryError)
-      .then((queryResult) => queryResult.data?.contractAction);
-    return maybeContractStates
-      ? [
-          parseHexZswapState(maybeContractStates.zswapState),
-          parseHexContractState(maybeContractStates.state),
-          maybeContractStates.transaction?.block?.ledgerParameters
-            ? parseHexLedgerParameters(maybeContractStates.transaction.block.ledgerParameters)
-            : LedgerParameters.initialParameters()
-        ]
-      : null;
+      .then((queryResult) => queryResult.data?.contractAction)
+      .then((maybeContractStates) =>
+        maybeContractStates
+          ? ([
+              parseHexZswapState(maybeContractStates.zswapState),
+              parseHexContractState(maybeContractStates.state),
+              maybeContractStates.transaction?.block?.ledgerParameters
+                ? parseHexLedgerParameters(maybeContractStates.transaction.block.ledgerParameters)
+                : LedgerParameters.initialParameters()
+            ] as [ZswapChainState, ContractState, LedgerParameters])
+          : null
+      );
   }
 
-  async queryUnshieldedBalances(
+  queryUnshieldedBalances(
     address: ContractAddress,
     config?: BlockHeightConfig | BlockHashConfig
   ): Promise<UnshieldedBalances | null> {
+    assertIsContractAddress(address);
     const offset: InputMaybe<ContractActionOffset> = config
       ? {
           blockOffset:
             config.type === 'blockHeight' ? { height: config.blockHeight } : { hash: config.blockHash }
         }
       : null;
-    const maybeUnshieldedBalances = await this.client
+    return this.client
       .query({
         query: QUERY_UNSHIELDED_BALANCES_WITH_OFFSET,
         variables: {
@@ -187,21 +193,21 @@ export class IndexerPublicDataProvider implements PublicDataProvider {
       .then(maybeThrowQueryError)
       .then((queryResult) => {
         const contractAction = queryResult.data?.contractAction;
-        if (!contractAction) {
-          return null;
-        }
-        if ('unshieldedBalances' in contractAction) {
-          return contractAction.unshieldedBalances;
-        }
-        if ('deploy' in contractAction) {
-          return contractAction.deploy.unshieldedBalances;
-        }
-        return [];
-      });
-    return maybeUnshieldedBalances ? toUnshieldedBalances(maybeUnshieldedBalances) : null;
+        if (!contractAction) return null;
+        return extractUnshieldedBalances(contractAction, 'queryUnshieldedBalances');
+      })
+      .then((maybeUnshieldedBalances) =>
+        maybeUnshieldedBalances ? toUnshieldedBalances(maybeUnshieldedBalances) : null
+      );
   }
 
-  async queryDeployContractState(contractAddress: ContractAddress): Promise<ContractState | null> {
+  queryDeployContractState(contractAddress: ContractAddress): Promise<ContractState | null> {
+    assertIsContractAddress(contractAddress);
+    // Shape discrimination kept inline: this branch additionally does an
+    // address-correlated `find` over `contractActions` and throws
+    // `IndexerDataError.missingContractAction` (not `IndexerInvariantError`)
+    // on missing match — different error semantics from the helpers in
+    // `mapping.ts`, so extraction would obscure rather than simplify.
     return this.client
       .query({
         query: DEPLOY_CONTRACT_STATE_TX_QUERY,
@@ -231,90 +237,121 @@ export class IndexerPublicDataProvider implements PublicDataProvider {
       .then((maybeContractState) => (maybeContractState ? parseHexContractState(maybeContractState) : null));
   }
 
-  async watchForContractState(contractAddress: ContractAddress): Promise<ContractState> {
+  watchForContractState(contractAddress: ContractAddress): Promise<ContractState> {
+    assertIsContractAddress(contractAddress);
     return Rx.firstValueFrom(
       waitForContractToAppear(this.client, this.pollInterval)(contractAddress)(null).pipe(Rx.map(parseHexContractState))
     );
   }
 
-  async watchForUnshieldedBalances(contractAddress: ContractAddress): Promise<UnshieldedBalances> {
+  watchForUnshieldedBalances(contractAddress: ContractAddress): Promise<UnshieldedBalances> {
+    assertIsContractAddress(contractAddress);
     return Rx.firstValueFrom(
       waitForUnshieldedBalancesToAppear(this.client, this.pollInterval)(contractAddress).pipe(Rx.map(toUnshieldedBalances))
     );
   }
 
-  async watchForDeployTxData(contractAddress: ContractAddress): Promise<FinalizedTxData> {
+  watchForDeployTxData(contractAddress: ContractAddress): Promise<FinalizedTxData> {
+    assertIsContractAddress(contractAddress);
     return Rx.firstValueFrom(
-      this.client
-        .watchQuery({
-          query: DEPLOY_TX_QUERY,
-          variables: {
-            address: contractAddress
-          },
-          pollInterval: this.pollInterval,
-          fetchPolicy: 'no-cache',
-          initialFetchPolicy: 'no-cache',
-          nextFetchPolicy: 'no-cache'
-        })
-        .pipe(
-          withCompleteQueryData(),
-          Rx.filter((data) => data.contractAction !== null),
-          Rx.map((data) => {
-            const contract = data.contractAction as ExcludeEmptyAndNull<DeployTxQueryQuery['contractAction']>;
-
-            return 'deploy' in contract ? contract.deploy.transaction : contract.transaction;
-          }),
-          Rx.filter(isRegularTransaction),
-          Rx.map((transaction: RegularTransaction) => toFinalizedDeployTxData(contractAddress, transaction))
-        )
+      pollUntilPresent(
+        this.client,
+        DEPLOY_TX_QUERY,
+        { address: contractAddress },
+        (data) => extractRegularDeployTransaction(data.contractAction) !== null,
+        (data) => {
+          const transaction = extractRegularDeployTransaction(data.contractAction);
+          if (transaction === null) {
+            throw new IndexerInvariantError(
+              'watchForDeployTxData: extracted transaction unexpectedly null after predicate'
+            );
+          }
+          return toFinalizedDeployTxData(contractAddress, transaction);
+        },
+        this.pollInterval
+      )
     );
   }
 
-  async watchForTxData(txId: TransactionId): Promise<FinalizedTxData> {
+  watchForTxData(txId: TransactionId): Promise<FinalizedTxData> {
     return Rx.firstValueFrom(
-      this.client
-        .watchQuery({
-          query: TX_ID_QUERY,
-          variables: { offset: { identifier: txId } },
-          pollInterval: this.pollInterval,
-          fetchPolicy: 'no-cache',
-          initialFetchPolicy: 'no-cache',
-          nextFetchPolicy: 'no-cache'
-        })
-        .pipe(
-          withCompleteQueryData(),
-          Rx.filter((data) => data.transactions.length !== 0),
-          Rx.map((data) => data.transactions[0]!),
-          Rx.filter(isRegularTransaction),
-          Rx.map(
-            (transaction: RegularTransaction): FinalizedTxData => ({
-              tx: parseHexTransaction(transaction.raw),
-              status: toTxStatus(transaction.transactionResult),
-              txId,
-              txHash: transaction.hash,
-              identifiers: transaction.identifiers,
-              blockHeight: transaction.block.height,
-              blockHash: transaction.block.hash,
-              segmentStatusMap: toSegmentStatusMap(transaction.transactionResult),
-              unshielded: toUnshieldedUtxos(transaction.unshieldedCreatedOutputs, transaction.unshieldedSpentOutputs),
-              blockTimestamp: transaction.block.timestamp,
-              blockAuthor: transaction.block.author,
-              indexerId: transaction.id,
-              protocolVersion: transaction.protocolVersion,
-              fees: {
-                paidFees: transaction.fees.paidFees,
-                estimatedFees: transaction.fees.estimatedFees
-              }
-            })
-          )
-        )
+      pollUntilPresent(
+        this.client,
+        TX_ID_QUERY,
+        { offset: { identifier: txId } },
+        (data) => {
+          const first = data.transactions[0];
+          return first !== undefined && isRegularTransaction(first);
+        },
+        (data): FinalizedTxData => {
+          const first = data.transactions[0];
+          if (first === undefined || !isRegularTransaction(first)) {
+            throw new IndexerInvariantError(
+              'watchForTxData: transactions array unexpectedly empty or non-regular after predicate'
+            );
+          }
+          const transaction: RegularTransaction & { hash: string; identifiers: string[] } = first;
+          return {
+            tx: parseHexTransaction(transaction.raw),
+            status: toTxStatus(transaction.transactionResult),
+            txId,
+            txHash: transaction.hash,
+            identifiers: transaction.identifiers,
+            blockHeight: transaction.block.height,
+            blockHash: transaction.block.hash,
+            segmentStatusMap: toSegmentStatusMap(transaction.transactionResult),
+            unshielded: toUnshieldedUtxos(transaction.unshieldedCreatedOutputs, transaction.unshieldedSpentOutputs),
+            blockTimestamp: transaction.block.timestamp,
+            blockAuthor: transaction.block.author,
+            indexerId: transaction.id,
+            protocolVersion: transaction.protocolVersion,
+            fees: {
+              paidFees: transaction.fees.paidFees,
+              estimatedFees: transaction.fees.estimatedFees
+            }
+          };
+        },
+        this.pollInterval
+      )
     );
   }
 
+  /**
+   * Creates a stream of contract states for `contractAddress`.
+   *
+   * **Wire-traffic asymmetry by branch:**
+   *
+   * | Branch                                 | Pipeline                                                                                            | Wire traffic |
+   * |----------------------------------------|-----------------------------------------------------------------------------------------------------|--------------|
+   * | `latest` / `blockHeight` / `blockHash` | poll for block-presence → `TXS_FROM_BLOCK_SUB` + client-side address filter                          | **Heavy** — every block on chain flows over WS; client extracts states for this contract. |
+   * | `txId`                                 | poll `TX_ID_QUERY` → `TXS_FROM_BLOCK_SUB` from the tx's block → walk states matching the identifier  | **Heavy** — same `TXS_FROM_BLOCK_SUB` subscription as above, opened once the tx is located. |
+   * | `all`                                  | poll for contract-presence → `CONTRACT_STATE_SUB($address, offset: null)`                            | **Light** — server-side filter; only this contract's state changes flow over WS. |
+   *
+   * The heavy path emits one observable value per matching contract action
+   * in each block — a per-block "states-at-this-block" view. It is used
+   * everywhere a block-level anchor matters (latest block, specific block
+   * with `inclusive`, transaction → containing-block). The light path
+   * (`all`) emits one value per state change directly from the
+   * server-filtered subscription — bandwidth scales with state changes
+   * rather than chain activity.
+   *
+   * Why not unify: `CONTRACT_STATE_SUB` is per-change, so a downstream
+   * `Rx.skip(1)` would skip the first state change rather than the first
+   * block — `inclusive: false` on `blockHeight`/`blockHash` would have a
+   * subtly different meaning. `TXS_FROM_BLOCK_SUB` for `all` would stream
+   * every block on chain (orders of magnitude more bytes on a busy chain).
+   *
+   * See {@link blockOffsetToBlock$}, {@link blockOffsetToContractState$},
+   * and {@link blockToContractState$} for per-subscription docs.
+   *
+   * @param contractAddress The address of the contract of interest.
+   * @param config The configuration of the stream. Defaults to `latest`.
+   */
   contractStateObservable(
     contractAddress: ContractAddress,
     config: ContractStateObservableConfig = { type: 'latest' }
   ): Rx.Observable<ContractState> {
+    assertIsContractAddress(contractAddress);
     if (config.type === 'txId') {
       const contractStates = transactionIdToTransaction$(this.client, this.pollInterval)(config.txId).pipe(
         Rx.filter(isRegularTransaction),
@@ -344,10 +381,31 @@ export class IndexerPublicDataProvider implements PublicDataProvider {
     return maybeShortenedBlocks.pipe(Rx.concatMap(blockToContractState$(contractAddress)));
   }
 
+  /**
+   * Creates a stream of unshielded balances for `contractAddress`.
+   *
+   * All three non-`txId` branches (`latest`/`all`/`blockHeight`/`blockHash`)
+   * use `UNSHIELDED_BALANCE_SUB($address, $offset)` as the terminal
+   * subscription. **Wire traffic is uniformly light** — server-side
+   * filtered by `contractAddress`. The indexer has no per-block
+   * subscription analogue for balances, so there is no light/heavy
+   * asymmetry comparable to {@link contractStateObservable}.
+   *
+   * The `txId` configuration is not supported and throws
+   * {@link IndexerProviderConfigError}. Tx-anchored balance streams are
+   * not exposed by the indexer's subscription surface — for the related
+   * contract-state stream see {@link contractStateObservable}.
+   *
+   * See {@link blockOffsetToUnshieldedBalances$} for the per-subscription doc.
+   *
+   * @param contractAddress The address of the contract of interest.
+   * @param config The configuration of the stream. Defaults to `latest`.
+   */
   unshieldedBalancesObservable(
     contractAddress: ContractAddress,
     config: ContractStateObservableConfig = { type: 'latest' }
   ): Rx.Observable<UnshieldedBalances> {
+    assertIsContractAddress(contractAddress);
     if (config.type === 'txId') {
       throw new IndexerProviderConfigError(
         'txId configuration not supported for unshielded balances observable'

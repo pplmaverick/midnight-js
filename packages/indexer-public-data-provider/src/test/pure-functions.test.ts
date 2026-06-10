@@ -37,11 +37,13 @@ import {
   IndexerDataError,
   IndexerError,
   IndexerFormattedError,
+  IndexerInvariantError,
   IndexerProviderConfigError,
   IndexerQueryError,
   IndexerSubscriptionDataError
 } from '../errors';
 import type { TransactionResult } from '../gen/graphql';
+import { extractRegularDeployTransaction, extractUnshieldedBalances } from '../mapping';
 
 describe('isRegularTransaction', () => {
   test('returns true for object with hash and identifiers array', () => {
@@ -76,6 +78,22 @@ describe('isRegularTransaction', () => {
     const blockQueryResult = { block: { height: 1000, hash: '0xabc' } };
 
     expect(isRegularTransaction(blockQueryResult)).toBe(false);
+  });
+
+  test('returns false for null', () => {
+    expect(isRegularTransaction(null)).toBe(false);
+  });
+
+  test('returns false for undefined', () => {
+    expect(isRegularTransaction(undefined)).toBe(false);
+  });
+
+  test('returns false for a number primitive', () => {
+    expect(isRegularTransaction(42)).toBe(false);
+  });
+
+  test('returns false for a string primitive', () => {
+    expect(isRegularTransaction('hash')).toBe(false);
   });
 });
 
@@ -401,6 +419,94 @@ describe('IndexerProviderConfigError', () => {
     expect(error).toBeInstanceOf(IndexerError);
     expect(error.name).toBe('IndexerProviderConfigError');
     expect(error.message).toBe('Unsupported observable mode: txId');
+  });
+});
+
+describe('extractRegularDeployTransaction', () => {
+  const regularTx = {
+    hash: 'tx-hash',
+    identifiers: ['id-1'],
+    block: { height: 1, hash: 'block-hash', author: null, timestamp: 0 },
+    raw: '',
+    id: 1,
+    protocolVersion: 0,
+    fees: { estimatedFees: '0', paidFees: '0' },
+    transactionResult: { status: 'SUCCESS' as const, segments: null },
+    contractActions: [],
+    unshieldedCreatedOutputs: [],
+    unshieldedSpentOutputs: []
+  };
+
+  test('returns null when contractAction is null', () => {
+    expect(extractRegularDeployTransaction(null)).toBeNull();
+  });
+
+  test('returns the regular transaction from the ContractDeploy / ContractUpdate variant', () => {
+    const action = { transaction: regularTx } as unknown as Parameters<typeof extractRegularDeployTransaction>[0];
+
+    expect(extractRegularDeployTransaction(action)).toEqual(regularTx);
+  });
+
+  test('returns the regular transaction from the ContractCall variant via deploy.transaction', () => {
+    const action = { deploy: { transaction: regularTx } } as unknown as Parameters<typeof extractRegularDeployTransaction>[0];
+
+    expect(extractRegularDeployTransaction(action)).toEqual(regularTx);
+  });
+
+  test('returns null when the underlying transaction is not a regular transaction', () => {
+    const systemTx = { id: 99, raw: '' }; // no identifiers/hash → fails isRegularTransaction
+    const action = { transaction: systemTx } as unknown as Parameters<typeof extractRegularDeployTransaction>[0];
+
+    expect(extractRegularDeployTransaction(action)).toBeNull();
+  });
+});
+
+describe('extractUnshieldedBalances', () => {
+  const balance = { tokenType: 'abc', amount: '100' };
+
+  test('returns balances from direct unshieldedBalances field (ContractUpdate / ContractDeploy variant)', () => {
+    expect(extractUnshieldedBalances({ unshieldedBalances: [balance] }, 'site')).toEqual([balance]);
+  });
+
+  test('returns balances from deploy.unshieldedBalances (ContractCall variant)', () => {
+    expect(extractUnshieldedBalances({ deploy: { unshieldedBalances: [balance] } }, 'site')).toEqual([balance]);
+  });
+
+  test('returns an empty array when the matching field exists and is empty', () => {
+    expect(extractUnshieldedBalances({ unshieldedBalances: [] }, 'site')).toEqual([]);
+  });
+
+  test('throws IndexerInvariantError with the caller name when neither field is present', () => {
+    let thrown: unknown;
+    try {
+      extractUnshieldedBalances({} as never, 'siteName');
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeInstanceOf(IndexerInvariantError);
+    expect((thrown as IndexerInvariantError).message).toBe(
+      'siteName: contractAction has neither unshieldedBalances nor deploy field'
+    );
+  });
+});
+
+describe('IndexerInvariantError', () => {
+  test('exposes message and name', () => {
+    const error = new IndexerInvariantError(
+      'watchForTxData: empty transactions array passed the non-empty filter'
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(IndexerError);
+    expect(error.name).toBe('IndexerInvariantError');
+    expect(error.message).toBe('watchForTxData: empty transactions array passed the non-empty filter');
+  });
+
+  test('is distinct from IndexerDataError', () => {
+    const error = new IndexerInvariantError('any');
+
+    expect(error).not.toBeInstanceOf(IndexerDataError);
   });
 });
 

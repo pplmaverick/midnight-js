@@ -23,7 +23,8 @@ import {
   toTxStatus,
   toUnshieldedUtxos
 } from './codec';
-import type { RegularTransaction } from './gen/graphql';
+import { IndexerInvariantError } from './errors';
+import type { ContractBalance, DeployTxQueryQuery, RegularTransaction } from './gen/graphql';
 
 type IsEmptyObject<T> = keyof T extends never ? true : false;
 export type ExcludeEmptyAndNull<T> = T extends null ? never : IsEmptyObject<T> extends true ? never : T;
@@ -33,11 +34,60 @@ export const hasContractAction = <T extends { contractAction?: unknown }>(
 ): data is T & { contractAction: NonNullable<T['contractAction']> } =>
   data.contractAction != null;
 
+/**
+ * Structural shape of a `contractAction` payload (or `contractActions` on the
+ * subscription variant) that carries unshielded balances. `ContractDeploy` /
+ * `ContractUpdate` expose them directly; `ContractCall` reaches them via
+ * `deploy.unshieldedBalances`.
+ */
+export type UnshieldedBalanceContractAction =
+  | { readonly deploy: { readonly unshieldedBalances: readonly ContractBalance[] } }
+  | { readonly unshieldedBalances: readonly ContractBalance[] };
+
+/**
+ * Returns the `ContractBalance[]` carried by a contract action regardless of
+ * which variant produced it. Throws {@link IndexerInvariantError} when the
+ * payload has neither shape — surfaces indexer schema drift loudly rather
+ * than silently degrading to `[]`. `callerName` is embedded in the error
+ * message so the throw site is preserved in diagnostics.
+ */
+export const extractUnshieldedBalances = (
+  action: UnshieldedBalanceContractAction,
+  callerName: string
+): readonly ContractBalance[] => {
+  if ('unshieldedBalances' in action) return action.unshieldedBalances;
+  if ('deploy' in action) return action.deploy.unshieldedBalances;
+  throw new IndexerInvariantError(
+    `${callerName}: contractAction has neither unshieldedBalances nor deploy field`
+  );
+};
+
 export const isRegularTransaction = (
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  tx: any
+  tx: unknown
 ): tx is RegularTransaction & { hash: string; identifiers: string[] } => {
-  return 'identifiers' in tx && 'hash' in tx && Array.isArray(tx.identifiers);
+  if (typeof tx !== 'object' || tx === null) return false;
+  if (!('identifiers' in tx) || !('hash' in tx)) return false;
+  return Array.isArray((tx as { identifiers: unknown }).identifiers);
+};
+
+/**
+ * Walks a `DeployTxQueryQuery.contractAction` payload to the underlying
+ * transaction and returns it iff it is a regular (non-system) transaction.
+ * Returns `null` for two distinct cases:
+ * 1. `contractAction === null` — indexer hasn't produced data yet; callers
+ *    use this as the "keep polling" signal.
+ * 2. The contract action carries a non-regular (system) transaction shape.
+ *
+ * `ContractCall` reaches the transaction via `deploy.transaction`;
+ * `ContractDeploy` / `ContractUpdate` expose it directly as `transaction`.
+ */
+export const extractRegularDeployTransaction = (
+  contractAction: DeployTxQueryQuery['contractAction']
+): (RegularTransaction & { hash: string; identifiers: string[] }) | null => {
+  if (contractAction === null) return null;
+  const contract = contractAction as ExcludeEmptyAndNull<DeployTxQueryQuery['contractAction']>;
+  const transaction = 'deploy' in contract ? contract.deploy.transaction : contract.transaction;
+  return isRegularTransaction(transaction) ? transaction : null;
 };
 
 export const toFinalizedDeployTxData = (
