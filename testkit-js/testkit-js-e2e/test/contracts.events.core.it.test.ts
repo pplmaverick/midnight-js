@@ -41,13 +41,10 @@ const logger = createLogger(
 /**
  * MIP-0002 contract events (spec §5.6) — the non-token event families (Misc and the Paused/Unpaused
  * lifecycle pair). Each circuit call lives in its own test (emission outside `beforeAll`) so a single
- * stalled proof fails only that test. Token events live in the sibling shielded/unshielded suites.
- *
- * The `PublicDataProvider` streaming surface (contractEventsObservable / getAllContractEvents) is NOT
- * exercised here: opening the events WebSocket prevents the Node process from exiting in CI even
- * after teardown leaves an empty event loop (#1001), hanging the shard to its job timeout. Streaming
- * stays covered by the provider package's own unit suites (events-provider, get-all-contract-events)
- * and the indexer-public-data-provider.observable1/2 e2e suites; re-enable here once #1001 is fixed.
+ * stalled proof fails only that test. Token events live in the sibling shielded/unshielded suites;
+ * the provider read surface (query filtering and contractEventsObservable streaming) lives in
+ * contracts.events.provider.it.test.ts, and getAllContractEvents pagination stays covered by the
+ * provider package's unit suites.
  */
 describe('Contract events — core (E2E)', () => {
   let env: EventsEnvironment;
@@ -64,13 +61,8 @@ describe('Contract events — core (E2E)', () => {
     await teardownEventsEnvironment(env);
   });
 
-  // SKIPPED: the Misc circuit is by far the heaviest proof in the suite (emitMisc.zkir is ~5x the
-  // next largest). On under-provisioned CI runners its proof saturates the host and freezes the
-  // node, proof-server and test worker together until the 30-min job timeout (observed in run
-  // 28380102696, where the node stopped minting blocks the instant proving began). Re-enable once
-  // the proof-server footprint is bounded (e.g. resource limits / NUM_WORKERS) or the runner is
-  // resourced for it. Misc emission stays covered by the provider package unit suites.
-  test.skip('emits a Misc event with the full structure and emitted values', async () => {
+  // The Misc circuit is the heaviest proof in the suite (emitMisc.zkir is ~5x the next largest).
+  test('emits a Misc event with the full structure and emitted values', async () => {
     await api.emitMisc(env.deployedContract, NAME, PAYLOAD);
     const event = findEvent(await query(), 'Misc');
     assertBaseEvent(event, env.contractAddress);

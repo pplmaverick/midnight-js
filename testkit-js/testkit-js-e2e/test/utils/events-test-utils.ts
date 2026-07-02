@@ -81,25 +81,36 @@ export interface EventsEnvironment {
   publicDataProvider: PublicDataProvider;
   deployedContract: DeployedEventsContract;
   contractAddress: ContractAddress;
+  deployBlockHeight: number;
 }
 
 /** Starts a test environment and deploys a fresh events contract. Shared by the per-family suites. */
 export const deployEventsEnvironment = async (logger: Logger): Promise<EventsEnvironment> => {
   const testEnvironment = getTestEnvironment(logger);
   const environmentConfiguration = await testEnvironment.start();
-  api.setLogger(logger);
-  const wallet = await testEnvironment.getMidnightWalletProvider();
-  const providers = initializeMidnightProviders(wallet, environmentConfiguration, new EventsConfiguration());
-  const deployedContract = await api.deploy(providers);
-  return {
-    testEnvironment,
-    publicDataProvider: providers.publicDataProvider,
-    deployedContract,
-    contractAddress: deployedContract.deployTxData.public.contractAddress
-  };
+  try {
+    api.setLogger(logger);
+    const wallet = await testEnvironment.getMidnightWalletProvider();
+    const providers = initializeMidnightProviders(wallet, environmentConfiguration, new EventsConfiguration());
+    const deployedContract = await api.deploy(providers);
+    return {
+      testEnvironment,
+      publicDataProvider: providers.publicDataProvider,
+      deployedContract,
+      contractAddress: deployedContract.deployTxData.public.contractAddress,
+      deployBlockHeight: deployedContract.deployTxData.public.blockHeight
+    };
+  } catch (error) {
+    // The containers are already up; stop them so a failed deploy doesn't leak them for the rest of the job.
+    await testEnvironment.shutdown().catch(() => undefined);
+    throw error;
+  }
 };
 
-/** Stops the test environment (and its containers). Shared by the per-family suites. */
-export const teardownEventsEnvironment = async (env: EventsEnvironment): Promise<void> => {
-  await env.testEnvironment.shutdown();
+/**
+ * Stops the test environment (and its containers). Shared by the per-family suites. Accepts
+ * `undefined` because afterAll runs even when beforeAll failed before assigning the environment.
+ */
+export const teardownEventsEnvironment = async (env: EventsEnvironment | undefined): Promise<void> => {
+  await env?.testEnvironment.shutdown();
 };
