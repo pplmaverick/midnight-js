@@ -50,8 +50,11 @@ import {
   ZswapOffer,
   ZswapOutput
 } from '@midnight-ntwrk/midnight-js-protocol/ledger';
+import * as PlatformContractAddress from '@midnight-ntwrk/midnight-js-protocol/platform-js/effect/ContractAddress';
 import { isDeserializationError, toHex } from '@midnight-ntwrk/midnight-js-utils';
 import { randomBytes } from 'crypto';
+import { Option } from 'effect';
+import { readFileSync } from 'fs';
 import { beforeAll } from 'vitest';
 
 import {
@@ -64,6 +67,27 @@ import {
   toLedgerQueryContext,
   ZSWAP_MERKLE_ROOT_RETENTION_SECONDS} from '../../utils';
 const emptyTranscript: PartitionedTranscript = [undefined, undefined];
+
+/**
+ * A real, serialized verifier key. `createUnprovenLedgerCallTx` hashes each operation's verifier
+ * key into the call's key location (see `ZKConfigRegistry`), and the `ContractOperation.verifierKey`
+ * setter validates the bytes against the `midnight:verifier-key[v6]:` header — so fixtures cannot
+ * use arbitrary bytes. We reuse a committed compiled key; its contents are irrelevant to these
+ * tests (only that it is a valid, present key).
+ */
+const DUMMY_VERIFIER_KEY = new Uint8Array(
+  readFileSync(new URL('../resources/compiled/shielded-map/keys/deposit.verifier', import.meta.url))
+);
+
+/**
+ * Builds a contract operation carrying a valid verifier key, as every operation reached by
+ * `createUnprovenLedgerCallTx` must have one.
+ */
+const makeOperation = (): ContractOperation => {
+  const operation = new ContractOperation();
+  operation.verifierKey = DUMMY_VERIFIER_KEY;
+  return operation;
+};
 
 describe('ledger-utils', () => {
   beforeAll(() => {
@@ -94,7 +118,7 @@ describe('ledger-utils', () => {
   it('createUnprovenLedgerCallTx returns an UnprovenTransaction', () => {
     const circuitId = 'unProvenLedgerTx';
     const contractState = dummyContractState;
-    const contractOperation = new ContractOperation();
+    const contractOperation = makeOperation();
 
     contractState.setOperation(circuitId, contractOperation);
 
@@ -119,14 +143,17 @@ describe('ledger-utils', () => {
     };
 
     const tx = createUnprovenLedgerCallTx(
-      circuitId,
-      contractAddress,
-      contractState,
+      [
+        {
+          contractAddress: PlatformContractAddress.ContractAddress(contractAddress),
+          circuitId,
+          public: { contractState: contractState.data.state, publicTranscript: [], partitionedTranscript: emptyTranscript },
+          private: { input: alignedValue, output: alignedValue, privateTranscriptOutputs },
+          communicationCommitment: Option.none()
+        }
+      ],
+      () => contractState,
       zswapChainState,
-      emptyTranscript,
-      privateTranscriptOutputs,
-      alignedValue,
-      alignedValue,
       nextZswapLocalState,
       dummyEncPublicKey
     );
@@ -149,14 +176,17 @@ describe('ledger-utils', () => {
 
     expect(() =>
       createUnprovenLedgerCallTx(
-        unregisteredCircuitId,
-        sampleContractAddress(),
-        contractState,
+        [
+          {
+            contractAddress: PlatformContractAddress.ContractAddress(sampleContractAddress()),
+            circuitId: unregisteredCircuitId,
+            public: { contractState: contractState.data.state, publicTranscript: [], partitionedTranscript: emptyTranscript },
+            private: { input: alignedValue, output: alignedValue, privateTranscriptOutputs: [] },
+            communicationCommitment: Option.none()
+          }
+        ],
+        () => contractState,
         new ZswapChainState(),
-        emptyTranscript,
-        [],
-        alignedValue,
-        alignedValue,
         {
           outputs: [],
           inputs: [],
@@ -181,6 +211,9 @@ describe('ledger-utils', () => {
       const emptyZswap = { coinPublicKey: shieldedCpk, outputs: [], inputs: [], currentIndex: 0n };
       const initResult = await shieldedContract.initialState({ initialPrivateState: undefined, initialZswapLocalState: emptyZswap });
       shieldedInitialState = initResult.currentContractState;
+      const depositOperation = shieldedInitialState.operation('deposit')!;
+      depositOperation.verifierKey = DUMMY_VERIFIER_KEY;
+      shieldedInitialState.setOperation('deposit', depositOperation);
     });
 
     it('succeeds with deposit circuit that calls receiveShielded', async () => {
@@ -201,14 +234,21 @@ describe('ledger-utils', () => {
       const partitioned: PartitionedTranscript = [transcript, undefined];
 
       const tx = createUnprovenLedgerCallTx(
-        'deposit',
-        shieldedAddr,
-        shieldedInitialState,
+        [
+          {
+            contractAddress: PlatformContractAddress.ContractAddress(shieldedAddr),
+            circuitId: 'deposit',
+            public: { contractState: shieldedInitialState.data.state, publicTranscript: [], partitionedTranscript: partitioned },
+            private: {
+              input: proofData.input,
+              output: proofData.output,
+              privateTranscriptOutputs: proofData.privateTranscriptOutputs
+            },
+            communicationCommitment: Option.none()
+          }
+        ],
+        () => shieldedInitialState,
         new ZswapChainState(),
-        partitioned,
-        proofData.privateTranscriptOutputs,
-        proofData.input,
-        proofData.output,
         { outputs: [], inputs: [], coinPublicKey: shieldedCpk, currentIndex: 0n },
         dummyEncPublicKey
       );
@@ -287,19 +327,22 @@ describe('ledger-utils', () => {
       ];
 
       const contractState = new CompactContractState();
-      contractState.setOperation(circuitId, new ContractOperation());
+      contractState.setOperation(circuitId, makeOperation());
       const contractAddress = sampleContractAddress();
 
       // Act
       const tx = createUnprovenLedgerCallTx(
-        circuitId,
-        contractAddress,
-        contractState,
+        [
+          {
+            contractAddress: PlatformContractAddress.ContractAddress(contractAddress),
+            circuitId,
+            public: { contractState: contractState.data.state, publicTranscript: [], partitionedTranscript: partitioned },
+            private: { input: alignedValue, output: alignedValue, privateTranscriptOutputs: [] },
+            communicationCommitment: Option.none()
+          }
+        ],
+        () => contractState,
         new ZswapChainState(),
-        partitioned,
-        [],
-        alignedValue,
-        alignedValue,
         {
           currentIndex: 0n,
           coinPublicKey: walletCpk,
@@ -330,19 +373,22 @@ describe('ledger-utils', () => {
         undefined
       ];
       const contractState = new CompactContractState();
-      contractState.setOperation(circuitId, new ContractOperation());
+      contractState.setOperation(circuitId, makeOperation());
       const contractAddress = sampleContractAddress();
 
       // Act
       const tx = createUnprovenLedgerCallTx(
-        circuitId,
-        contractAddress,
-        contractState,
+        [
+          {
+            contractAddress: PlatformContractAddress.ContractAddress(contractAddress),
+            circuitId,
+            public: { contractState: contractState.data.state, publicTranscript: [], partitionedTranscript: partitioned },
+            private: { input: alignedValue, output: alignedValue, privateTranscriptOutputs: [] },
+            communicationCommitment: Option.none()
+          }
+        ],
+        () => contractState,
         new ZswapChainState(),
-        partitioned,
-        [],
-        alignedValue,
-        alignedValue,
         {
           currentIndex: 0n,
           coinPublicKey: walletCpk,
@@ -373,18 +419,21 @@ describe('ledger-utils', () => {
         makeTranscript([], [], [nullifier])
       ];
       const contractState = new CompactContractState();
-      contractState.setOperation(circuitId, new ContractOperation());
+      contractState.setOperation(circuitId, makeOperation());
 
       // Act
       const tx = createUnprovenLedgerCallTx(
-        circuitId,
-        contractAddress,
-        contractState,
+        [
+          {
+            contractAddress: PlatformContractAddress.ContractAddress(contractAddress),
+            circuitId,
+            public: { contractState: contractState.data.state, publicTranscript: [], partitionedTranscript: partitioned },
+            private: { input: alignedValue, output: alignedValue, privateTranscriptOutputs: [] },
+            communicationCommitment: Option.none()
+          }
+        ],
+        () => contractState,
         chainState,
-        partitioned,
-        [],
-        alignedValue,
-        alignedValue,
         {
           currentIndex: 0n,
           coinPublicKey: walletCpk,
@@ -418,19 +467,22 @@ describe('ledger-utils', () => {
         makeTranscript([], [commitment], [])
       ];
       const contractState = new CompactContractState();
-      contractState.setOperation(circuitId, new ContractOperation());
+      contractState.setOperation(circuitId, makeOperation());
       const contractAddress = sampleContractAddress();
 
       // Act
       const tx = createUnprovenLedgerCallTx(
-        circuitId,
-        contractAddress,
-        contractState,
+        [
+          {
+            contractAddress: PlatformContractAddress.ContractAddress(contractAddress),
+            circuitId,
+            public: { contractState: contractState.data.state, publicTranscript: [], partitionedTranscript: partitioned },
+            private: { input: alignedValue, output: alignedValue, privateTranscriptOutputs: [] },
+            communicationCommitment: Option.none()
+          }
+        ],
+        () => contractState,
         new ZswapChainState(),
-        partitioned,
-        [],
-        alignedValue,
-        alignedValue,
         {
           currentIndex: 0n,
           coinPublicKey: walletCpk,
@@ -465,18 +517,21 @@ describe('ledger-utils', () => {
         makeTranscript([outputCommitment], [], [nullifier])
       ];
       const contractState = new CompactContractState();
-      contractState.setOperation(circuitId, new ContractOperation());
+      contractState.setOperation(circuitId, makeOperation());
 
       // Act
       const tx = createUnprovenLedgerCallTx(
-        circuitId,
-        contractAddress,
-        contractState,
+        [
+          {
+            contractAddress: PlatformContractAddress.ContractAddress(contractAddress),
+            circuitId,
+            public: { contractState: contractState.data.state, publicTranscript: [], partitionedTranscript: partitioned },
+            private: { input: alignedValue, output: alignedValue, privateTranscriptOutputs: [] },
+            communicationCommitment: Option.none()
+          }
+        ],
+        () => contractState,
         chainState,
-        partitioned,
-        [],
-        alignedValue,
-        alignedValue,
         {
           currentIndex: 0n,
           coinPublicKey: walletCpk,
@@ -639,18 +694,25 @@ describe('ledger-utils', () => {
       fallible: Transcript<AlignedValue> | undefined
     ) => {
       const contractState = new CompactContractState();
-      contractState.setOperation(circuitId, new ContractOperation());
+      contractState.setOperation(circuitId, makeOperation());
       const contractAddress = sampleContractAddress();
 
       return createUnprovenLedgerCallTx(
-        circuitId,
-        contractAddress,
-        contractState,
+        [
+          {
+            contractAddress: PlatformContractAddress.ContractAddress(contractAddress),
+            circuitId,
+            public: {
+              contractState: contractState.data.state,
+              publicTranscript: [],
+              partitionedTranscript: [guaranteed, fallible] as PartitionedTranscript
+            },
+            private: { input: alignedValue, output: alignedValue, privateTranscriptOutputs },
+            communicationCommitment: Option.none()
+          }
+        ],
+        () => contractState,
         new ZswapChainState(),
-        [guaranteed, fallible] as PartitionedTranscript,
-        privateTranscriptOutputs,
-        alignedValue,
-        alignedValue,
         nextZswapLocalState,
         dummyEncPublicKey
       );

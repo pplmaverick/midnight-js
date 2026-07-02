@@ -147,6 +147,8 @@ export async function createUnprovenDeployTxFromVerifierKeys<C extends Contract.
         initialContractState
       },
       private: {
+        // Compact.js returns the maintenance-authority key as a structured `SigningKey` ({ tag, value }),
+        // which already carries its signature scheme, so it is threaded through unchanged.
         signingKey,
         initialPrivateState: privateState,
         initialZswapState: zswapLocalState,
