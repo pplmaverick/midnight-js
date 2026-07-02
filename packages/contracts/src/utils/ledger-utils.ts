@@ -166,12 +166,17 @@ export const createUnprovenLedgerCallTx = (
     );
   }
 
-  const guaranteedOutputs = extractUserAddressedOutputs(rootCall.public.partitionedTranscript[0]);
+  // A user-addressed unshielded output can be produced by any call in the tree, not just the root,
+  // and every call's transcript is attached to the intent above. The transaction has a single
+  // guaranteed and a single fallible unshielded offer, so each must aggregate the user-addressed
+  // outputs across all calls, per segment. Assembling them from the root call alone would drop a
+  // callee's payout and leave the transaction unbalanced (rejected on submission).
+  const guaranteedOutputs = calls.flatMap((call) => extractUserAddressedOutputs(call.public.partitionedTranscript[0]));
   if (guaranteedOutputs.length > 0) {
     intent.guaranteedUnshieldedOffer = UnshieldedOffer.new([], guaranteedOutputs, []);
   }
 
-  const fallibleOutputs = extractUserAddressedOutputs(rootCall.public.partitionedTranscript[1]);
+  const fallibleOutputs = calls.flatMap((call) => extractUserAddressedOutputs(call.public.partitionedTranscript[1]));
   if (fallibleOutputs.length > 0) {
     intent.fallibleUnshieldedOffer = UnshieldedOffer.new([], fallibleOutputs, []);
   }
