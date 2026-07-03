@@ -35,14 +35,12 @@ export const encodeFixed = (text: string, length: number): Uint8Array => {
 export const NAME = encodeFixed('Greeting', 32);
 export const PAYLOAD = encodeFixed('hello world', 256);
 export const NULLIFIER = new Uint8Array(32).fill(7);
-export const COMMITMENT = new Uint8Array(32).fill(9);
 export const TOKEN_TYPE = new Uint8Array(32).fill(3);
 export const AMOUNT = 1000n;
 
 export const NAME_HEX = toHex(NAME);
 export const PAYLOAD_HEX = toHex(PAYLOAD);
 export const NULLIFIER_HEX = toHex(NULLIFIER);
-export const COMMITMENT_HEX = toHex(COMMITMENT);
 export const TOKEN_TYPE_HEX = toHex(TOKEN_TYPE);
 export const ZERO32_HEX = toHex(new Uint8Array(32));
 export const ZSWAP_KEY_HEX = ZERO32_HEX;

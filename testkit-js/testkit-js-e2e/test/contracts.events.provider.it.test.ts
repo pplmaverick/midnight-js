@@ -29,14 +29,16 @@ import * as api from '@/events-api';
 
 import {
   assertBaseEvent,
-  COMMITMENT,
-  COMMITMENT_HEX,
   createIdMonotonicityCheck,
   deployEventsEnvironment,
   type EventsEnvironment,
   findEvent,
+  NAME,
+  NAME_HEX,
   NULLIFIER,
   NULLIFIER_HEX,
+  PAYLOAD,
+  PAYLOAD_HEX,
   teardownEventsEnvironment
 } from './utils/events-test-utils';
 
@@ -45,15 +47,16 @@ const logger = createLogger(
 );
 
 /**
- * MIP-0002 events via the `PublicDataProvider` read surface: query filtering (spec §3) and
- * subscription streaming (spec §5.6). Both live in one file because CI runs one Docker environment
- * per test file, and these are cheap query/WebSocket tests over a shared corpus — unlike the
- * per-family emission suites, there is no per-test proof worth isolating.
+ * MIP-0002 events via the `PublicDataProvider` read surface (spec §3, §5.6): query filtering,
+ * subscription streaming, and the shielded/lifecycle event families. One file, one corpus, one CI
+ * Docker environment — proofs are the dominant CI cost, so the corpus is kept to the variants whose
+ * decode paths are not already exercised elsewhere (Unshielded* address decoding lives in its own
+ * suite; every remaining variant's mapping is covered by the provider package unit suites).
  *
  * The corpus is emitted once in `beforeAll`: two transactions finalized sequentially, so their
  * block heights are strictly increasing (asserted there, since the block-window and toBlock tests
  * depend on it). The filter describe must run before the subscription describe — the live-delivery
- * test appends a ShieldedReceive to the corpus, and the filter tests assert the full corpus.
+ * test appends a ShieldedBurn to the corpus, and the filter tests assert the full corpus.
  */
 describe('Contract events — provider read surface (E2E)', () => {
   let env: EventsEnvironment;
@@ -150,6 +153,8 @@ describe('Contract events — provider read surface (E2E)', () => {
       }
     });
 
+    // The one live emission doubles as the ShieldedBurn decode coverage (nullifier + the
+    // shieldedAmount → amount alias) — proofs dominate CI cost, so no separate corpus entry.
     test('delivers an event emitted after the subscription opened', async () => {
       const replayed = await query();
       const nextId = replayed[replayed.length - 1].id + 1;
@@ -158,12 +163,13 @@ describe('Contract events — provider read surface (E2E)', () => {
       // handler so the subscription's eventual teardown error cannot become an unhandled rejection.
       pendingEvent.catch(() => undefined);
 
-      await api.emitShieldedReceive(env.deployedContract, COMMITMENT);
+      await api.emitShieldedBurn(env.deployedContract, NULLIFIER);
 
       const event = await pendingEvent;
       assertBaseEvent(event, env.contractAddress);
-      if (event.eventType !== 'ShieldedReceive') throw new Error('unreachable');
-      expect(event.commitment).toBe(COMMITMENT_HEX);
+      if (event.eventType !== 'ShieldedBurn') throw new Error('unreachable');
+      expect(event.nullifier).toBe(NULLIFIER_HEX);
+      expect(event.amount).toBe('1');
     });
 
     test('startAt { fromId } resumes inclusively at that event', async () => {
@@ -176,11 +182,25 @@ describe('Contract events — provider read surface (E2E)', () => {
     });
 
     test('toBlock bounds the stream and completes it server-side', async () => {
-      // The ShieldedSpend from beforeAll sits in a later block, so this asserts both the bound and,
-      // via toArray() (which only emits on completion), that the indexer closes the stream.
+      // The ShieldedSpend from beforeAll sits in a later block, so this asserts both the bound
+      // and, via toArray() (which only emits on completion), that the indexer closes the stream.
       const events = await Rx.firstValueFrom(subscribe({ toBlock: lifecycleTx.blockHeight }).pipe(Rx.toArray()));
 
       expect(events.map((e) => e.eventType)).toEqual(['Paused', 'Unpaused']);
     });
+  });
+
+  // SKIPPED: proving emitMisc (the heaviest circuit in the suite, ~5x the next-largest zkir) makes
+  // the verbose proof server emit ~130MB of logs, which CI's per-line log processing cannot absorb
+  // within the 30-minute job timeout — the job is cancelled after the tests have already passed.
+  // Needs a proof-server-side fix (Ledger team). The test passes locally and Misc mapping stays
+  // covered by the provider package unit suites.
+  test.skip('emits a Misc event with the full structure and emitted values', async () => {
+    await api.emitMisc(env.deployedContract, NAME, PAYLOAD);
+    const event = findEvent(await query(), 'Misc');
+    assertBaseEvent(event, env.contractAddress);
+    if (event.eventType !== 'Misc') throw new Error('unreachable');
+    expect(event.name).toBe(NAME_HEX);
+    expect(event.payload).toBe(PAYLOAD_HEX);
   });
 });

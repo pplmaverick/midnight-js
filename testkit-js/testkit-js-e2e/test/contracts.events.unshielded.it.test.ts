@@ -84,16 +84,9 @@ describe('Contract events — Unshielded* (E2E)', () => {
     expect(event.amount).toBe('1000');
   });
 
-  test('emits an UnshieldedMint event with domain separator, token type and amount', async () => {
-    await api.emitUnshieldedMint(env.deployedContract, TOKEN_TYPE, AMOUNT);
-    const event = findEvent(await query(), 'UnshieldedMint');
-    assertBaseEvent(event, env.contractAddress);
-    checkId(event);
-    if (event.eventType !== 'UnshieldedMint') throw new Error('unreachable');
-    expect(event.domainSep).toBe(ZERO32_HEX);
-    expect(event.tokenType).toBe(TOKEN_TYPE_HEX);
-    expect(event.amount).toBe('1000');
-  });
+  // UnshieldedMint has no e2e test: it carries no address (the decode path where per-variant bugs
+  // have occurred), and its remaining fields are a subset of UnshieldedSpend's assertions above.
+  // Its mapping is covered by the provider package unit suites; each proof here costs CI minutes.
 
   test('emits an UnshieldedBurn event with sender, token type and amount', async () => {
     await api.emitUnshieldedBurn(env.deployedContract, TOKEN_TYPE, AMOUNT);
