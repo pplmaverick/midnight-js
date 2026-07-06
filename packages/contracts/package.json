@@ -1,6 +1,6 @@
 {
   "name": "@midnight-ntwrk/midnight-js-contracts",
-  "version": "5.0.0-alpha.1",
+  "version": "5.0.0-beta.3",
   "description": "MidnightJS module for interacting with contracts",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
@@ -32,7 +32,8 @@
     "@midnight-ntwrk/midnight-js-network-id": "workspace:*",
     "@midnight-ntwrk/midnight-js-protocol": "workspace:*",
     "@midnight-ntwrk/midnight-js-types": "workspace:*",
-    "@midnight-ntwrk/midnight-js-utils": "workspace:*"
+    "@midnight-ntwrk/midnight-js-utils": "workspace:*",
+    "effect": "^3.20.0"
   },
   "files": [
     "dist/"
