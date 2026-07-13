@@ -1,7 +1,7 @@
 # Vite + WASM Resolution in Midnight dApps
 
 When building a browser dApp with Midnight JS in a Vite monorepo, the
-`@midnight-ntwrk/ledger-v8` package (which uses `wasm-bindgen`) can be
+`@midnightntwrk/ledger-v9` package (which uses `wasm-bindgen`) can be
 instantiated multiple times across package boundaries. This causes subtle
 runtime failures where `instanceof` checks silently return `false` even
 for objects of the correct type.
@@ -9,7 +9,7 @@ for objects of the correct type.
 ## Symptoms
 
 - ZK proof generation fails with no clear error message
-- `instanceof` checks on Midnight SDK objects return `false` unexpectedly
+- `instanceof` checks on Midnight JS objects return `false` unexpectedly
 - Errors appear only in monorepo setups, not in single-package projects
 
 ## Option A: resolve.dedupe (recommended for most projects)
@@ -25,11 +25,9 @@ export default defineConfig({
   plugins: [wasm(), topLevelAwait()],
   resolve: {
     dedupe: [
-      '@midnight-ntwrk/ledger-v8',
+      '@midnightntwrk/ledger-v9',
       '@midnight-ntwrk/compact-runtime',
-      '@midnight-ntwrk/midnight-js-circuits',
     ],
-  },
 })
 ```
 
