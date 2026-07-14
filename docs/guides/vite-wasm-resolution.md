@@ -1,66 +1,66 @@
 # Vite + WASM Resolution in Midnight dApps
 
-When building a browser dApp with Midnight JS in a Vite monorepo, the
-`@midnightntwrk/ledger-v9` package (which uses `wasm-bindgen`) can be
-instantiated multiple times across package boundaries. This causes subtle
-runtime failures where `instanceof` checks silently return `false` even
-for objects of the correct type.
+When building a browser dApp with Midnight JS in a Vite monorepo,
+`@midnight-ntwrk/compact-runtime` and its underlying WASM layer
+(`@midnight-ntwrk/onchain-runtime-v3`) can be instantiated multiple times
+across package boundaries. Because wasm-bindgen ties class identity to the
+specific WASM instance that created an object, cross-instance `instanceof`
+checks silently return `false`, causing opaque circuit-execution failures
+that only surface in the browser — CLI and test paths pass because they use
+a single resolution tree.
+
+> **Status — interim workaround.** The root cause (instance-scoped WASM
+> class identity in wasm-bindgen) is being tracked upstream:
+> [LFDT-Minokawa/compact#611](https://github.com/LFDT-Minokawa/compact/issues/611)
+> and [midnightntwrk/midnight-ledger#644](https://github.com/midnightntwrk/midnight-ledger/issues/644).
+> The guidance below reflects the best known consumer-side mitigation until
+> upstream reaches a conclusion. See
+> [#1052](https://github.com/midnightntwrk/midnight-js/issues/1052) for
+> the full discovery write-up.
 
 ## Symptoms
 
-- ZK proof generation fails with no clear error message
-- `instanceof` checks on Midnight JS objects return `false` unexpectedly
-- Errors appear only in monorepo setups, not in single-package projects
+- Circuit calls fail with `ContractRuntimeError: Error executing circuit '<id>'`
+- `instanceof` checks on Midnight JS objects (`ChargedState`, `QueryContext`)
+  return `false` unexpectedly
+- Errors appear only in browser / Vite builds, not in CLI or test runs
 
-## Option A: resolve.dedupe (recommended for most projects)
+## Workaround: `resolve.dedupe`
 
 Add the following to your `vite.config.ts`:
 
 ```typescript
 import { defineConfig } from 'vite'
 import wasm from 'vite-plugin-wasm'
-import topLevelAwait from 'vite-plugin-top-level-await'
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait()],
+  plugins: [wasm()],
   resolve: {
     dedupe: [
-      '@midnightntwrk/ledger-v9',
       '@midnight-ntwrk/compact-runtime',
+      '@midnight-ntwrk/onchain-runtime-v3',
     ],
+  },
 })
 ```
 
 This forces Vite to resolve these packages to a single instance across
 all monorepo boundaries, preventing dual-instantiation.
 
-**When to use:** Standard Vite monorepo setups where the frontend is a
-subdirectory of a larger project.
+**Verified set:** `compact-runtime` is the confirmed failing package
+(`ChargedState` / `QueryContext` types); `onchain-runtime-v3` is the
+underlying WASM layer and is included as a same-class risk. Both were
+validated on a production mainnet deployment.
 
-## Option B: Custom resolveId hook + manualChunks (used in example-bboard)
-
-The official
-[example-bboard](https://github.com/midnightntwrk/example-bboard)
-uses an alternative approach with a custom `resolveId` plugin and
-`manualChunks` to control WASM module chunking at the bundler level.
-
-**When to use:** Projects that need fine-grained control over chunk
-splitting, or where `resolve.dedupe` alone does not resolve the issue.
-
-## Required plugins
-
-Both approaches require these Vite plugins to handle `wasm-bindgen`'s
-ESM import syntax, which Vite/esbuild does not support natively:
-
-```bash
-npm install -D vite-plugin-wasm vite-plugin-top-level-await
-```
+**Note on `vite-plugin-top-level-await`:** This plugin requires the
+`rollup` package and cannot load under Vite 8 / rolldown. It is not
+needed for the `resolve.dedupe` fix.
 
 ## References
 
 - Issue [#1052](https://github.com/midnightntwrk/midnight-js/issues/1052):
-  WASM dual-instantiation in Vite monorepo requires resolve.dedupe workaround
-- [example-bboard](https://github.com/midnightntwrk/example-bboard):
-  official Midnight dApp example with alternative bundler configuration
+  WASM dual-instantiation in Vite monorepo — full discovery write-up
+- Upstream: [LFDT-Minokawa/compact#611](https://github.com/LFDT-Minokawa/compact/issues/611),
+  [midnightntwrk/midnight-ledger#644](https://github.com/midnightntwrk/midnight-ledger/issues/644)
 - [Midnight Private Auction](https://github.com/pplmaverick/midnight-private-auction):
-  production dApp on Midnight Mainnet using Option A
+  production dApp on Midnight Mainnet where this workaround was first validated
